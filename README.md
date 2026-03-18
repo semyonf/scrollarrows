@@ -24,6 +24,72 @@ swiftc main.swift -o scroll_arrows
 ./scroll_arrows
 ```
 
+## Running in Background (launchd)
+
+To run ScrollArrows automatically on login without a terminal window, you can use macOS's launchd service:
+
+### 1. Compile and Install the Binary
+
+```bash
+# Compile the Swift source
+swiftc main.swift -o scroll_arrows
+
+# Install to system PATH (requires sudo)
+sudo cp scroll_arrows /usr/local/bin/scroll_arrows
+```
+
+### 2. Create the Launch Agent
+
+Create a plist file at `~/Library/LaunchAgents/com.scrollarrows.launchd.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.scrollarrows.launchd</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/scroll_arrows</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+    <key>StandardErrorPath</key>
+    <string>/dev/null</string>
+</dict>
+</plist>
+```
+
+### 3. Load the Service
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
+```
+
+### 4. Verify It's Running
+
+```bash
+launchctl list | grep scrollarrows
+```
+
+### Managing the Service
+
+```bash
+# Stop the service
+launchctl unload ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
+
+# Restart the service
+launchctl unload ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
+launchctl load ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
+```
+
+The service will now start automatically on every login and run indefinitely in the background with no terminal window and no log files.
+
 ## Initial Setup (Critical)
 
 ### 1. Grant Accessibility Permissions
