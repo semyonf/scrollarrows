@@ -51,7 +51,15 @@ ScrollArrows: Accessibility access: granted
 3. Scroll with mouse wheel or trackpad
 4. Arrow keys are generated instead of scroll
 
-### Changing the Modifier
+### Command Line Options
+
+```bash
+./scroll_arrows --invert    # Invert scroll direction (for ScrollReverser)
+./scroll_arrows -i          # Short form for --invert
+./scroll_arrows --help      # Show help message
+```
+
+### Changing the Modifier (compile-time)
 
 Edit [`main.swift`](main.swift) and modify the `Config` struct:
 

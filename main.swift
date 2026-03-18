@@ -27,8 +27,39 @@ struct Config {
     // Scroll delta threshold (point delta)
     static let scrollThreshold: Double = 1.0
     
+    // Invert scroll direction (set via command line flag --invert)
+    static var invertScrollDirection: Bool = false
+    
     // Health check interval in seconds
     static let healthCheckInterval: Double = 5.0
+    
+    // Parse command line arguments
+    static func parseArgs() {
+        let args = ProcessInfo.processInfo.arguments
+        for arg in args {
+            switch arg {
+            case "--invert", "-i":
+                invertScrollDirection = true
+            case "--help", "-h":
+                printHelp()
+                exit(0)
+            default:
+                break
+            }
+        }
+    }
+    
+    static func printHelp() {
+        print("""
+        ScrollArrows - Modifier+Scroll to Arrow Keys
+        
+        Usage: scroll_arrows [options]
+        
+        Options:
+          --invert, -i    Invert scroll direction (for use with ScrollReverser)
+          --help, -h      Show this help message
+        """)
+    }
 }
 
 // MARK: - Virtual Key Codes
@@ -242,7 +273,9 @@ final class EventTapManager {
         }
         
         // Determine direction and generate arrow key
-        let direction: ScrollDirection = delta > 0 ? .up : .down
+        // Apply inversion if configured (for use with ScrollReverser)
+        let adjustedDelta = Config.invertScrollDirection ? -delta : delta
+        let direction: ScrollDirection = adjustedDelta > 0 ? .up : .down
         
         // Swallow the scroll event and generate arrow key
         generateArrowKey(direction: direction, currentFlags: flags)
@@ -368,9 +401,18 @@ func setupSignalHandlers() {
 
 // MARK: - Main Entry Point
 
+// Parse command line arguments
+Config.parseArgs()
+
 print("========================================")
 print("ScrollArrows - Modifier+Scroll to Arrows")
 print("========================================")
+print("")
+
+// Print configuration info
+if Config.invertScrollDirection {
+    print("Invert scroll direction: enabled")
+}
 print("")
 
 // Setup signal handlers for clean shutdown
