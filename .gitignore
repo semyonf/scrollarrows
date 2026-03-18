@@ -1,0 +1,22 @@
+# Swift
+.swiftpm/
+.xcodebuild/
+build/
+DerivedData/
+
+# Compiled binaries
+scroll_arrows
+*.out
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# Xcode secrets (if any)
+*.entitlements
