@@ -304,8 +304,18 @@ final class EventTapManager {
         }
         
         // Determine direction and generate arrow key
-        // Apply inversion if configured (for use with ScrollReverser)
-        let adjustedDelta = Config.invertScrollDirection ? -delta : delta
+        let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
+
+        var adjustedDelta = delta
+
+        if isContinuous {
+            // Trackpad: always invert to match finger movement direction (undo macOS natural scrolling)
+            adjustedDelta = -delta
+        } else if Config.invertScrollDirection {
+            // Mouse wheel: only apply --invert flag if set
+            adjustedDelta = -delta
+        }
+
         let direction: ScrollDirection = adjustedDelta > 0 ? .up : .down
         
         // Swallow the scroll event and generate arrow key
