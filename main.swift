@@ -20,8 +20,9 @@ struct Config {
     // Modifier name for display
     static var triggerModifierName: String = "Control"
     
-    // Debounce interval in milliseconds (reduced for more responsive scrolling)
-    static let debounceIntervalMs: Int = 1
+    // Debounce intervals in milliseconds
+    static let debounceIntervalMs: Int = 1  // For mouse wheel
+    static let debounceIntervalMsTrackpad: Int = 5  // For trackpad (higher due to more events)
     
     // Scroll delta threshold (point delta)
     static let scrollThreshold: Double = 1.0
@@ -107,18 +108,19 @@ final class ScrollDebouncer {
     private let nanosecondsPerMs: UInt64 = 1_000_000
     
     /// Returns true if the scroll event should be processed, false if debounced
-    func shouldProcessScroll() -> Bool {
+    func shouldProcessScroll(isContinuous: Bool) -> Bool {
         let currentTime = mach_absolute_time()
-        
-        // Convert debounce interval to nanoseconds
-        let debounceNs = UInt64(Config.debounceIntervalMs) * nanosecondsPerMs
-        
+
+        // Use different debounce intervals for trackpad vs mouse
+        let intervalMs = isContinuous ? Config.debounceIntervalMsTrackpad : Config.debounceIntervalMs
+        let debounceNs = UInt64(intervalMs) * nanosecondsPerMs
+
         // Check if enough time has passed since last scroll
         if currentTime - lastScrollTime >= debounceNs {
             lastScrollTime = currentTime
             return true
         }
-        
+
         return false
     }
 }
@@ -288,24 +290,25 @@ final class EventTapManager {
         guard hasModifier else {
             return Unmanaged.passUnretained(event)
         }
-        
-        // Check if we should debounce
-        guard debouncer.shouldProcessScroll() else {
+
+        // Check if this is a continuous device (trackpad/magic mouse)
+        let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
+
+        // Check if we should debounce (use different interval for trackpad)
+        guard debouncer.shouldProcessScroll(isContinuous: isContinuous) else {
             // Still need to swallow the event to prevent scrolling
             return nil
         }
-        
+
         // Extract scroll delta
         let delta = extractScrollDelta(from: event)
-        
+
         // If delta is too small, ignore
         guard abs(delta) >= Config.scrollThreshold else {
             return Unmanaged.passUnretained(event)
         }
-        
-        // Determine direction and generate arrow key
-        let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
 
+        // Determine direction and generate arrow key
         var adjustedDelta = delta
 
         if isContinuous {
