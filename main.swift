@@ -21,8 +21,8 @@ struct Config {
     // Modifier name for display
     static let triggerModifierName: String = "Control"
     
-    // Debounce interval in milliseconds
-    static let debounceIntervalMs: Int = 80
+    // Debounce interval in milliseconds (reduced for more responsive scrolling)
+    static let debounceIntervalMs: Int = 1
     
     // Scroll delta threshold (point delta)
     static let scrollThreshold: Double = 1.0
