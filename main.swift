@@ -14,12 +14,11 @@ import IOKit.hid
 // MARK: - Configuration
 
 struct Config {
-    // Modifier key to trigger arrow key generation
-    // Options: .maskControl, .maskCommand, .maskAlternate, .maskShift
-    static let triggerModifier: CGEventFlags = .maskControl
+    // Modifier keys to trigger arrow key generation (multiple can be specified)
+    static var triggerModifiers: CGEventFlags = .maskControl
     
     // Modifier name for display
-    static let triggerModifierName: String = "Control"
+    static var triggerModifierName: String = "Control"
     
     // Debounce interval in milliseconds (reduced for more responsive scrolling)
     static let debounceIntervalMs: Int = 1
@@ -36,16 +35,37 @@ struct Config {
     // Parse command line arguments
     static func parseArgs() {
         let args = ProcessInfo.processInfo.arguments
+        var modifiers: CGEventFlags = []
+        var modifierNames: [String] = []
+        
         for arg in args {
             switch arg {
             case "--invert", "-i":
                 invertScrollDirection = true
+            case "--control", "-c":
+                modifiers.insert(.maskControl)
+                modifierNames.append("Control")
+            case "--option", "-o":
+                modifiers.insert(.maskAlternate)
+                modifierNames.append("Option")
+            case "--command", "-cmd":
+                modifiers.insert(.maskCommand)
+                modifierNames.append("Command")
+            case "--shift", "-s":
+                modifiers.insert(.maskShift)
+                modifierNames.append("Shift")
             case "--help", "-h":
                 printHelp()
                 exit(0)
             default:
                 break
             }
+        }
+        
+        // Set modifiers if any were specified
+        if !modifiers.isEmpty {
+            triggerModifiers = modifiers
+            triggerModifierName = modifierNames.joined(separator: "+")
         }
     }
     
@@ -56,8 +76,18 @@ struct Config {
         Usage: scroll_arrows [options]
         
         Options:
-          --invert, -i    Invert scroll direction (for use with ScrollReverser)
-          --help, -h      Show this help message
+          --control, -c      Use Control key (can be combined with others)
+          --option, -o       Use Option key (can be combined with others)
+          --command, -cmd    Use Command key (can be combined with others)
+          --shift, -s        Use Shift key (can be combined with others)
+          --invert, -i       Invert scroll direction (for use with ScrollReverser)
+          --help, -h         Show this help message
+        
+        Examples:
+          ./scroll_arrows                     # Default: Control key
+          ./scroll_arrows --option            # Option + scroll
+          ./scroll_arrows --control --shift   # Control+Shift + scroll
+          ./scroll_arrows --command --invert  # Command + scroll, inverted
         """)
     }
 }
@@ -251,7 +281,8 @@ final class EventTapManager {
         
         // Check if trigger modifier is pressed
         let flags = event.flags
-        let hasModifier = flags.contains(Config.triggerModifier)
+        // Check if ANY of the configured modifiers are pressed
+        let hasModifier = flags.contains(Config.triggerModifiers)
         
         // If modifier not pressed, pass through unchanged
         guard hasModifier else {
@@ -310,7 +341,7 @@ final class EventTapManager {
         
         // Strip the trigger modifier to prevent Control+Arrow (which triggers Mission Control)
         var modifiedFlags = currentFlags
-        modifiedFlags.remove(Config.triggerModifier)
+        modifiedFlags.remove(Config.triggerModifiers)
         
         // Create key down event
         guard let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true) else {
