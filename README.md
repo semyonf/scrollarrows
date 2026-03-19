@@ -1,46 +1,70 @@
-# ScrollArrows - Modifier+Scroll to Arrow Keys
+# ScrollArrows
 
-A lightweight macOS utility that converts modifier key + mousewheel scroll into discrete arrow key presses. Built with native Swift and CoreGraphics for maximum performance and minimal resource usage.
+**Navigate lists hands-free while reading with your scroll wheel.**
 
-## Features
+Instead of clicking down arrows 90 times while sorting through emails, just hold **Ctrl** and scroll. Instantly jump through your Apple Mail inbox without moving your hand to the keyboard. ScrollArrows converts your scroll wheel into arrow keys—making list navigation feel natural and seamless.
 
-- **Modifier+Scroll Detection**: Press `Control` + scroll to generate arrow keys
-- **Universal Scroll Handling**: Works with both trackpads (continuous) and notched mouse wheels (discrete)
-- **Debouncing**: Prevents event flooding with intelligent debouncing
-- **Auto-Recovery**: Automatically recovers from tap disable events
-- **Terminal-First**: Pure CLI binary for testing before GUI integration
+## What It Does
 
-## Compilation
+ScrollArrows is a lightweight macOS utility that lets you navigate lists using your mouse scroll wheel:
+
+1. **Hold Ctrl** + scroll your mouse wheel → generates **Up/Down arrow keys**
+2. **Release Ctrl** and continue → normal scrolling within your message/document
+3. **Works everywhere** — Mail, Messages, Finder, web browsers, any app with lists
+
+No clicking. No menu. Just hold and scroll.
+
+## The Real-World Use Case
+
+You're sorting through your Apple Mail inbox. Instead of:
+- Clicking the down arrow 90 times ↓↓↓
+- Reaching for your trackpad over and over
+- Breaking focus while scanning subjects
+
+You just:
+- **Hold Ctrl** and **scroll** through email list (hands stay on mouse)
+- **Release Ctrl** and **scroll** to read the full message
+- Your workflow stays smooth and natural
+
+## Quick Start
+
+### 1. Build It
 
 ```bash
-# Compile the Swift source
 swiftc main.swift -o scroll_arrows
 ```
 
-## Running
+### 2. Grant Permissions
 
+Run it once:
 ```bash
-# Execute the binary
 ./scroll_arrows
 ```
 
-## Running in Background (launchd)
+Then go to **System Settings → Privacy & Security → Accessibility** and enable Terminal (or whichever app you're using).
 
-To run ScrollArrows automatically on login without a terminal window, you can use macOS's launchd service:
-
-### 1. Compile and Install the Binary
+### 3. Start Using
 
 ```bash
-# Compile the Swift source
-swiftc main.swift -o scroll_arrows
+./scroll_arrows
+```
 
-# Install to system PATH (requires sudo)
+That's it. Hold Ctrl and scroll to navigate lists.
+
+## Run at Startup (Optional)
+
+Want ScrollArrows to start automatically when you log in?
+
+### 1. Install the Binary
+
+```bash
+swiftc main.swift -o scroll_arrows
 sudo cp scroll_arrows /usr/local/bin/scroll_arrows
 ```
 
-### 2. Create the Launch Agent
+### 2. Create Launch Agent
 
-Create a plist file at `~/Library/LaunchAgents/com.scrollarrows.launchd.plist`:
+Save this as `~/Library/LaunchAgents/com.scrollarrows.launchd.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -65,75 +89,48 @@ Create a plist file at `~/Library/LaunchAgents/com.scrollarrows.launchd.plist`:
 </plist>
 ```
 
-### 3. Load the Service
+### 3. Enable It
 
 ```bash
 launchctl load ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
 ```
 
-### 4. Verify It's Running
+It will now start automatically on every login, running silently in the background.
+
+### Manage the Service
 
 ```bash
+# Check if it's running
 launchctl list | grep scrollarrows
-```
 
-### Managing the Service
-
-```bash
-# Stop the service
+# Stop it
 launchctl unload ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
 
-# Restart the service
+# Restart it
 launchctl unload ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
 launchctl load ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
 ```
 
-The service will now start automatically on every login and run indefinitely in the background with no terminal window and no log files.
-
-## Initial Setup (Critical)
-
-### 1. Grant Accessibility Permissions
-
-Before the utility can intercept input events, you must grant Accessibility permissions:
-
-1. Run the utility: `./scroll_arrows`
-2. The utility will detect missing permissions and prompt you
-3. Open **System Settings → Privacy & Security → Accessibility**
-4. Enable the terminal app you're using (Terminal.app, iTerm2, etc.)
-5. If using a raw binary, you may need to add it manually via the "+" button
-
-### 2. Verify Permissions
-
-The utility will output permission status on startup:
-```
-ScrollArrows: Input Monitoring access: granted
-ScrollArrows: Accessibility access: granted
-```
-
-## Usage
-
-1. Launch the utility: `./scroll_arrows`
-2. Hold **Control** (or configured modifier)
-3. Scroll with mouse wheel or trackpad
-4. Arrow keys are generated instead of scroll
-
-### Command Line Options
+## Options
 
 ```bash
-./scroll_arrows --invert    # Invert scroll direction (for ScrollReverser)
-./scroll_arrows -i          # Short form for --invert
-./scroll_arrows --help      # Show help message
+./scroll_arrows --invert    # Invert scroll direction (if you use ScrollReverser)
+./scroll_arrows -i          # Short form
+./scroll_arrows --help      # Show help
 ```
 
-### Changing the Modifier (compile-time)
+## Customize the Modifier Key
 
-Edit [`main.swift`](main.swift) and modify the `Config` struct:
+By default, it uses **Control**. Want to use Cmd or Option instead?
+
+Edit `main.swift` and change the `Config` struct:
 
 ```swift
 struct Config {
-    // Change to your preferred modifier:
-    // .maskControl, .maskCommand, .maskAlternate, .maskShift
-    static let triggerModifier: CGEventFlags = .maskControl
+    static let triggerModifier: CGEventFlags = .maskControl  // Change to:
+    // .maskCommand    (⌘)
+    // .maskAlternate  (⌥)
+    // .maskShift      (⇧)
 }
 ```
 
@@ -144,76 +141,59 @@ swiftc main.swift -o scroll_arrows
 
 ## Troubleshooting
 
-### "Tap disabled by system" warnings
+**It's not working - I see warnings about "Tap disabled"**
+- Normal on macOS Sequoia/Tahoe. The utility auto-recovers. Just leave it running.
 
-This is normal on macOS Sequoia/Tahoe. The utility includes auto-recovery that will re-enable the tap automatically.
+**No arrow keys being generated**
+1. Check: Did you grant Accessibility permissions? (System Settings → Privacy & Security → Accessibility)
+2. Check: Are you holding the right modifier? (Default is Ctrl)
+3. Check: Is another app (Karabiner, BetterTouchTool) intercepting your mouse events first?
 
-### No arrow keys generated
+**Permissions reset after recompilation**
+- Each new compilation creates a new binary. You may need to re-grant Accessibility permissions.
+- To help persistence:
+  ```bash
+  xattr -d com.apple.quarantine ./scroll_arrows
+  codesign --force --deep -s - ./scroll_arrows
+  ```
 
-1. **Check permissions**: Ensure Accessibility is granted
-2. **Check modifier**: Verify you're holding the correct modifier key
-3. **Check other apps**: Other utilities (Karabiner, BetterTouchTool) may be intercepting events first
+**Permission issues on iTerm2 or other terminals**
+- Try resetting permissions:
+  ```bash
+  # For Terminal.app
+  tccutil reset Accessibility com.apple.Terminal
 
-### "Silent Disable Race" (Tap exists but no callbacks fire)
+  # For iTerm2
+  tccutil reset Accessibility com.googlecode.iterm2
+  ```
+  Then re-grant in System Settings.
 
-This occurs when TCC permissions aren't properly persisted. Try:
+## How It Works (Technical Details)
 
-```bash
-# Reset accessibility for terminal
-tccutil reset Accessibility com.apple.Terminal
+**The Pipeline:**
+1. Intercepts mouse scroll events at the system level (CGEventTap)
+2. Detects if your modifier key (Ctrl by default) is held
+3. Converts scroll deltas into Up/Down arrow key presses
+4. Works with both trackpads (continuous scroll) and mouse wheels (discrete notches)
+5. Includes intelligent debouncing to prevent event flooding
 
-# Or for iTerm2
-tccutil reset Accessibility com.googlecode.iterm2
-```
+**Key Features:**
+- **Lightweight**: Native Swift + CoreGraphics, minimal resource usage
+- **Universal**: Works with trackpads and mouse wheels
+- **Auto-Recovery**: Handles macOS permission edge cases automatically
+- **Debounced**: 80ms lockout prevents event spam
 
-Then re-grant permissions in System Settings.
+**Components** (for developers):
+- `EventTapManager` — Manages system event interception
+- `ScrollDebouncer` — Prevents rapid-fire events
+- `handleEvent()` — Core scroll-to-arrow conversion logic
+- `generateArrowKey()` — Creates synthetic arrow key events
 
-### Permission denied after recompilation
+## Compatibility
 
-Each compilation creates a new binary with a new signature. Re-add to Accessibility:
-```bash
-# Remove quarantine attribute
-xattr -d com.apple.quarantine ./scroll_arrows
-
-# Re-sign (optional, helps with TCC persistence)
-codesign --force --deep -s - ./scroll_arrows
-```
-
-## Architecture
-
-### Event Tap Pipeline
-
-1. **CGEventTap** at `cgSessionEventTap` (headInsertEventTap)
-2. **Modifier Detection**: Check `event.flags` for trigger modifier
-3. **Scroll Delta Extraction**: Read `scrollWheelEventPointDeltaAxis1` or `scrollWheelEventDeltaAxis1`
-4. **Continuity Check**: Handle trackpads vs. mouse wheels differently
-5. **Debouncing**: 80ms temporal lockout prevents flooding
-6. **Synthetic Key Generation**: Create paired keyDown/keyUp events with modifier stripped
-
-### Key Components
-
-| Component | Purpose |
-|-----------|---------|
-| [`EventTapManager`](main.swift:89) | Manages CGEventTap lifecycle |
-| [`ScrollDebouncer`](main.swift:56) | Prevents event flooding |
-| [`checkAndRequestPermissions()`](main.swift:130) | TCC/Accessibility handling |
-| [`handleEvent()`](main.swift:197) | Core event processing |
-| [`generateArrowKey()`](main.swift:252) | Synthetic keystroke generation |
-
-## macOS Version Compatibility
-
-- **macOS Sequoia (15.x)**: Fully supported with Accessibility permissions
-- **macOS Tahoe (26.x)**: Fully supported with Accessibility permissions
-- **Note**: Input Monitoring permissions require 30-day renewal; Accessibility does not
-
-## Next Steps
-
-This is the Terminal-first validation version. To create a full GUI application:
-
-1. Wrap the `EventTapManager` in an `ObservableObject`
-2. Create a SwiftUI `MenuBarExtra` app
-3. Add `LSUIElement` to Info.plist to hide Dock icon
-4. Add settings UI for modifier selection
+- **macOS Sequoia (15.x)**: ✓ Fully supported
+- **macOS Tahoe (26.x)**: ✓ Fully supported
+- Requires: Accessibility permissions
 
 ## License
 
