@@ -1,3 +1,5 @@
+> 100% Vibecode: planned, implemented and documented by Gemini 3 Pro, MiniMax 2.5 and Claude Haiku
+
 # ScrollArrows
 
 **Navigate lists hands-free while reading with your scroll wheel.**
