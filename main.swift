@@ -72,10 +72,10 @@ struct Config {
     
     static func printHelp() {
         print("""
-        ScrollArrows - Modifier+Scroll to Arrow Keys
-        
+        ScrollArrows - Modifier+Scroll to Arrow Keys & Mouse Wheel to Return
+
         Usage: scroll_arrows [options]
-        
+
         Options:
           --control, -c      Use Control key (can be combined with others)
           --option, -o       Use Option key (can be combined with others)
@@ -83,7 +83,11 @@ struct Config {
           --shift, -s        Use Shift key (can be combined with others)
           --invert, -i       Invert scroll direction (for use with ScrollReverser)
           --help, -h         Show this help message
-        
+
+        Features:
+          - Modifier + scroll wheel/trackpad → arrow keys (up/down)
+          - Modifier + mouse wheel click (middle button) → Return key
+
         Examples:
           ./scroll_arrows                     # Default: Control key
           ./scroll_arrows --option            # Option + scroll
@@ -98,6 +102,7 @@ struct Config {
 struct KeyCodes {
     static let upArrow: CGKeyCode = 126
     static let downArrow: CGKeyCode = 125
+    static let returnKey: CGKeyCode = 36
 }
 
 // MARK: - Scroll Detector
@@ -137,31 +142,32 @@ final class EventTapManager {
     
     func start() -> Bool {
         print("[\(Date())] ScrollArrows: Starting event tap manager...")
-        
+
         // Check TCC permissions first
         guard checkAndRequestPermissions() else {
             print("[\(Date())] ScrollArrows: ERROR - Accessibility permissions not granted")
             print("[\(Date())] ScrollArrows: Please grant Accessibility access in System Settings > Privacy & Security > Accessibility")
             return false
         }
-        
+
         // Create the event tap
         guard createEventTap() else {
             print("[\(Date())] ScrollArrows: ERROR - Failed to create event tap")
             return false
         }
-        
+
         // Start health monitoring
         startHealthCheck()
-        
+
         isRunning = true
         print("[\(Date())] ScrollArrows: Event tap started successfully")
-        print("[\(Date())] ScrollArrows: Press \(Config.triggerModifierName) + scroll to generate arrow keys")
+        print("[\(Date())] ScrollArrows: \(Config.triggerModifierName) + scroll → arrow keys")
+        print("[\(Date())] ScrollArrows: \(Config.triggerModifierName) + mouse wheel click → Return key")
         print("[\(Date())] ScrollArrows: Press Ctrl+C to stop")
-        
+
         // Run the main run loop
         RunLoop.current.run()
-        
+
         return true
     }
     
@@ -215,9 +221,11 @@ final class EventTapManager {
     
     private func createEventTap() -> Bool {
         // Define the events we want to intercept
-        let eventMask: CGEventMask = (1 << CGEventType.scrollWheel.rawValue) | 
+        let eventMask: CGEventMask = (1 << CGEventType.scrollWheel.rawValue) |
                                       (1 << CGEventType.keyDown.rawValue) |
                                       (1 << CGEventType.keyUp.rawValue) |
+                                      (1 << CGEventType.otherMouseDown.rawValue) |
+                                      (1 << CGEventType.otherMouseUp.rawValue) |
                                       (1 << CGEventType.tapDisabledByTimeout.rawValue) |
                                       (1 << CGEventType.tapDisabledByUserInput.rawValue)
         
@@ -275,17 +283,47 @@ final class EventTapManager {
             }
             return Unmanaged.passUnretained(event)
         }
-        
+
+        // Handle mouse wheel button press (middle button / other mouse button)
+        if type == .otherMouseDown {
+            let flags = event.flags
+            let hasModifier = flags.contains(Config.triggerModifiers)
+
+            // Check if this is the mouse wheel button (button 2) with modifier
+            let buttonNumber = event.getIntegerValueField(.mouseEventButtonNumber)
+            if hasModifier && buttonNumber == 2 {
+                // Generate Return key and swallow the event
+                generateReturnKey(currentFlags: flags)
+                return nil  // Swallow the event
+            }
+
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Ignore otherMouseUp events when modifier is pressed (we already handled the press)
+        if type == .otherMouseUp {
+            let flags = event.flags
+            let hasModifier = flags.contains(Config.triggerModifiers)
+
+            let buttonNumber = event.getIntegerValueField(.mouseEventButtonNumber)
+            if hasModifier && buttonNumber == 2 {
+                // Swallow the release event
+                return nil
+            }
+
+            return Unmanaged.passUnretained(event)
+        }
+
         // Only process scroll wheel events
         guard type == .scrollWheel else {
             return Unmanaged.passUnretained(event)
         }
-        
+
         // Check if trigger modifier is pressed
         let flags = event.flags
         // Check if ANY of the configured modifiers are pressed
         let hasModifier = flags.contains(Config.triggerModifiers)
-        
+
         // If modifier not pressed, pass through unchanged
         guard hasModifier else {
             return Unmanaged.passUnretained(event)
@@ -320,10 +358,10 @@ final class EventTapManager {
         }
 
         let direction: ScrollDirection = adjustedDelta > 0 ? .up : .down
-        
+
         // Swallow the scroll event and generate arrow key
         generateArrowKey(direction: direction, currentFlags: flags)
-        
+
         // Return nil to swallow the event
         return nil
     }
@@ -345,37 +383,69 @@ final class EventTapManager {
     
     private func generateArrowKey(direction: ScrollDirection, currentFlags: CGEventFlags) {
         let keyCode = (direction == .up) ? KeyCodes.upArrow : KeyCodes.downArrow
-        
+
         // Create event source
         guard let source = CGEventSource(stateID: .privateState) else {
             print("[\(Date())] ScrollArrows: ERROR - Failed to create event source")
             return
         }
-        
+
         // Strip the trigger modifier to prevent Control+Arrow (which triggers Mission Control)
         var modifiedFlags = currentFlags
         modifiedFlags.remove(Config.triggerModifiers)
-        
+
         // Create key down event
         guard let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true) else {
             print("[\(Date())] ScrollArrows: ERROR - Failed to create key down event")
             return
         }
         keyDownEvent.flags = modifiedFlags
-        
+
         // Create key up event
         guard let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
             print("[\(Date())] ScrollArrows: ERROR - Failed to create key up event")
             return
         }
         keyUpEvent.flags = modifiedFlags
-        
+
         // Post events
         keyDownEvent.post(tap: .cghidEventTap)
         keyUpEvent.post(tap: .cghidEventTap)
-        
+
         let directionStr = (direction == .up) ? "UP" : "DOWN"
         print("[\(Date())] ScrollArrows: Generated \(directionStr) arrow key")
+    }
+
+    private func generateReturnKey(currentFlags: CGEventFlags) {
+        // Create event source
+        guard let source = CGEventSource(stateID: .privateState) else {
+            print("[\(Date())] ScrollArrows: ERROR - Failed to create event source")
+            return
+        }
+
+        // Strip the trigger modifier
+        var modifiedFlags = currentFlags
+        modifiedFlags.remove(Config.triggerModifiers)
+
+        // Create key down event
+        guard let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: KeyCodes.returnKey, keyDown: true) else {
+            print("[\(Date())] ScrollArrows: ERROR - Failed to create Return key down event")
+            return
+        }
+        keyDownEvent.flags = modifiedFlags
+
+        // Create key up event
+        guard let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: KeyCodes.returnKey, keyDown: false) else {
+            print("[\(Date())] ScrollArrows: ERROR - Failed to create Return key up event")
+            return
+        }
+        keyUpEvent.flags = modifiedFlags
+
+        // Post events
+        keyDownEvent.post(tap: .cghidEventTap)
+        keyUpEvent.post(tap: .cghidEventTap)
+
+        print("[\(Date())] ScrollArrows: Generated Return key")
     }
     
     // MARK: - Health Monitoring
