@@ -14,7 +14,7 @@ ScrollArrows is a lightweight macOS utility that lets you navigate lists using y
 2. **Release Ctrl** and continue → normal scrolling within your message/document
 3. **Works everywhere** — Mail, Messages, Finder, web browsers, any app with lists
 
-No clicking. No menu. Just hold and scroll.
+No clicking. Just hold and scroll. Settings live in a small menu bar icon.
 
 ## The Real-World Use Case
 
@@ -30,115 +30,51 @@ You just:
 
 ## Quick Start
 
-### 1. Build It
+### 1. Build the app
 
 ```bash
-swiftc main.swift -o scroll_arrows
+./build.sh
 ```
 
-### 2. Grant Permissions
+This creates `build/ScrollArrows.app`. Move it to `/Applications` if you like.
 
-Run it once:
-```bash
-./scroll_arrows
-```
-
-Then go to **System Settings → Privacy & Security → Accessibility** and enable Terminal (or whichever app you're using).
-
-### 3. Start Using
+### 2. Launch and grant access
 
 ```bash
-./scroll_arrows
+open build/ScrollArrows.app
 ```
 
-That's it. Hold Ctrl and scroll to navigate lists.
+macOS asks for Accessibility access. Enable **ScrollArrows** in **System Settings → Privacy & Security → Accessibility**. The app picks up the permission by itself, no restart needed.
 
-## Run at Startup (Optional)
+### 3. Use it
 
-Want ScrollArrows to start automatically when you log in?
+Hold Ctrl and scroll. The arrows icon in the menu bar shows that the app is active.
 
-### 1. Install the Binary
+## Settings
+
+Click the menu bar icon → **Settings…**:
+
+- **Scroll → arrow keys** — click the field, press the modifier keys you want (e.g. ⌃⌥), release them. Esc cancels.
+- **Middle click → Return** — turn on or off, and pick its modifier the same way.
+- **Invert mouse wheel direction** — for ScrollReverser and similar tools.
+- **Launch at login** — registers the app as a login item.
+- **Show icon in menu bar** — turn off to hide the icon. To get the settings back, open ScrollArrows again (Finder, Spotlight or `open`).
+
+The menu also has a quick **Enabled** toggle.
+
+Accessibility permission is tied to the code signature. With the default ad hoc signature a rebuild may require granting it again. Sign with your own certificate to avoid that:
 
 ```bash
-swiftc main.swift -o scroll_arrows
-sudo cp scroll_arrows /usr/local/bin/scroll_arrows
+SIGN_ID="Apple Development: you@example.com" ./build.sh
 ```
 
-### 2. Create Launch Agent
+### Migrating from the launchd version
 
-Save this as `~/Library/LaunchAgents/com.scrollarrows.launchd.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.scrollarrows.launchd</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/scroll_arrows</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/dev/null</string>
-    <key>StandardErrorPath</key>
-    <string>/dev/null</string>
-</dict>
-</plist>
-```
-
-### 3. Enable It
+If you set up the old `launchd` agent, remove it, otherwise both copies will handle the same events:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
-```
-
-It will now start automatically on every login, running silently in the background.
-
-### Manage the Service
-
-```bash
-# Check if it's running
-launchctl list | grep scrollarrows
-
-# Stop it
-launchctl unload ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
-
-# Restart it
-launchctl unload ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
-launchctl load ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
-```
-
-## Options
-
-```bash
-./scroll_arrows --invert    # Invert scroll direction (if you use ScrollReverser)
-./scroll_arrows -i          # Short form
-./scroll_arrows --help      # Show help
-```
-
-## Customize the Modifier Key
-
-By default, it uses **Control**. Want to use Cmd or Option instead?
-
-Edit `main.swift` and change the `Config` struct:
-
-```swift
-struct Config {
-    static let triggerModifier: CGEventFlags = .maskControl  // Change to:
-    // .maskCommand    (⌘)
-    // .maskAlternate  (⌥)
-    // .maskShift      (⇧)
-}
-```
-
-Then recompile:
-```bash
-swiftc main.swift -o scroll_arrows
+launchctl bootout gui/$(id -u)/com.scrollarrows.launchd
+rm ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
 ```
 
 ## Troubleshooting
@@ -189,7 +125,7 @@ swiftc main.swift -o scroll_arrows
 - `EventTapManager` — Manages system event interception
 - `ScrollDebouncer` — Prevents rapid-fire events
 - `handleEvent()` — Core scroll-to-arrow conversion logic
-- `generateArrowKey()` — Creates synthetic arrow key events
+- `postKey()` — Creates synthetic arrow and Return key events
 
 ## Compatibility
 

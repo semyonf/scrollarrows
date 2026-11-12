@@ -1,134 +1,108 @@
 //
-//  ScrollArrows - Terminal-first CGEventTap implementation
-//  Converts modifier+scroll to arrow key presses
+//  ScrollArrows - menu bar app
+//  Modifier + scroll -> Up/Down arrow keys, modifier + middle click -> Return
 //
-//  Compile: swiftc main.swift -o scroll_arrows
-//  Run: ./scroll_arrows
+//  Build the app:  ./build.sh   (creates build/ScrollArrows.app)
+//  Plain binary:   swiftc main.swift -o scroll_arrows
 //
 
-import Foundation
+import AppKit
+import ApplicationServices
+import Combine
 import CoreGraphics
-import IOKit
-import IOKit.hid
+import ServiceManagement
+import SwiftUI
 
-// MARK: - Configuration
+// MARK: - Settings
 
-struct Config {
-    // Modifier keys to trigger arrow key generation (multiple can be specified)
-    static var triggerModifiers: CGEventFlags = .maskControl
-    
-    // Modifier name for display
-    static var triggerModifierName: String = "Control"
-    
-    // Debounce intervals in milliseconds
-    static let debounceIntervalMs: Int = 1  // For mouse wheel
-    static let debounceIntervalMsTrackpad: Int = 5  // For trackpad (higher due to more events)
-    
-    // Scroll delta threshold (point delta)
-    static let scrollThreshold: Double = 1.0
-    
-    // Invert scroll direction (set via command line flag --invert)
-    static var invertScrollDirection: Bool = false
-    
-    // Health check interval in seconds
-    static let healthCheckInterval: Double = 5.0
-    
-    // Parse command line arguments
-    static func parseArgs() {
-        let args = ProcessInfo.processInfo.arguments
-        var modifiers: CGEventFlags = []
-        var modifierNames: [String] = []
-        
-        for arg in args {
-            switch arg {
-            case "--invert", "-i":
-                invertScrollDirection = true
-            case "--control", "-c":
-                modifiers.insert(.maskControl)
-                modifierNames.append("Control")
-            case "--option", "-o":
-                modifiers.insert(.maskAlternate)
-                modifierNames.append("Option")
-            case "--command", "-cmd":
-                modifiers.insert(.maskCommand)
-                modifierNames.append("Command")
-            case "--shift", "-s":
-                modifiers.insert(.maskShift)
-                modifierNames.append("Shift")
-            case "--help", "-h":
-                printHelp()
-                exit(0)
-            default:
-                break
-            }
-        }
-        
-        // Set modifiers if any were specified
-        if !modifiers.isEmpty {
-            triggerModifiers = modifiers
-            triggerModifierName = modifierNames.joined(separator: "+")
-        }
+/// User settings, persisted in UserDefaults. Read by the event tap on every event.
+final class Settings: ObservableObject {
+    static let shared = Settings()
+    private let d = UserDefaults.standard
+
+    @Published var enabled: Bool { didSet { d.set(enabled, forKey: "enabled") } }
+    @Published var scrollModifiers: UInt64 { didSet { d.set(scrollModifiers, forKey: "scrollModifiers") } }
+    @Published var returnEnabled: Bool { didSet { d.set(returnEnabled, forKey: "returnEnabled") } }
+    @Published var returnModifiers: UInt64 { didSet { d.set(returnModifiers, forKey: "returnModifiers") } }
+    @Published var invertWheel: Bool { didSet { d.set(invertWheel, forKey: "invertWheel") } }
+    @Published var showMenuBarIcon: Bool { didSet { d.set(showMenuBarIcon, forKey: "showMenuBarIcon") } }
+
+    private init() {
+        let ctrl = CGEventFlags.maskControl.rawValue
+        d.register(defaults: [
+            "enabled": true,
+            "scrollModifiers": ctrl,
+            "returnEnabled": true,
+            "returnModifiers": ctrl,
+            "invertWheel": false,
+            "showMenuBarIcon": true,
+        ])
+        enabled = d.bool(forKey: "enabled")
+        scrollModifiers = (d.object(forKey: "scrollModifiers") as? NSNumber)?.uint64Value ?? ctrl
+        returnEnabled = d.bool(forKey: "returnEnabled")
+        returnModifiers = (d.object(forKey: "returnModifiers") as? NSNumber)?.uint64Value ?? ctrl
+        invertWheel = d.bool(forKey: "invertWheel")
+        showMenuBarIcon = d.bool(forKey: "showMenuBarIcon")
     }
-    
-    static func printHelp() {
-        print("""
-        ScrollArrows - Modifier+Scroll to Arrow Keys & Mouse Wheel to Return
 
-        Usage: scroll_arrows [options]
+    var scrollFlags: CGEventFlags { CGEventFlags(rawValue: scrollModifiers) }
+    var returnFlags: CGEventFlags { CGEventFlags(rawValue: returnModifiers) }
+}
 
-        Options:
-          --control, -c      Use Control key (can be combined with others)
-          --option, -o       Use Option key (can be combined with others)
-          --command, -cmd    Use Command key (can be combined with others)
-          --shift, -s        Use Shift key (can be combined with others)
-          --invert, -i       Invert scroll direction (for use with ScrollReverser)
-          --help, -h         Show this help message
+// MARK: - Modifier helpers
 
-        Features:
-          - Modifier + scroll wheel/trackpad → arrow keys (up/down)
-          - Modifier + mouse wheel click (middle button) → Return key
+enum Modifiers {
+    /// Display order follows macOS menus: Control, Option, Shift, Command.
+    static let all: [(CGEventFlags, NSEvent.ModifierFlags, String)] = [
+        (.maskControl, .control, "⌃"),
+        (.maskAlternate, .option, "⌥"),
+        (.maskShift, .shift, "⇧"),
+        (.maskCommand, .command, "⌘"),
+    ]
 
-        Examples:
-          ./scroll_arrows                     # Default: Control key
-          ./scroll_arrows --option            # Option + scroll
-          ./scroll_arrows --control --shift   # Control+Shift + scroll
-          ./scroll_arrows --command --invert  # Command + scroll, inverted
-        """)
+    static func symbols(_ raw: UInt64) -> String {
+        let flags = CGEventFlags(rawValue: raw)
+        return all.filter { flags.contains($0.0) }.map { $0.2 }.joined()
+    }
+
+    static func cgFlags(from ns: NSEvent.ModifierFlags) -> UInt64 {
+        all.filter { ns.contains($0.1) }.reduce(CGEventFlags()) { $0.union($1.0) }.rawValue
     }
 }
 
 // MARK: - Virtual Key Codes
 
-struct KeyCodes {
+enum KeyCodes {
     static let upArrow: CGKeyCode = 126
     static let downArrow: CGKeyCode = 125
     static let returnKey: CGKeyCode = 36
+    static let escape: UInt16 = 53
 }
 
-// MARK: - Scroll Detector
+// MARK: - Scroll Debouncer
 
 /// Tracks scroll events and applies debouncing to prevent event flooding
 final class ScrollDebouncer {
     private var lastScrollTime: UInt64 = 0
     private let nanosecondsPerMs: UInt64 = 1_000_000
-    
+
+    // Debounce intervals in milliseconds
+    private let wheelMs: UInt64 = 1
+    private let trackpadMs: UInt64 = 5
+
     /// Returns true if the scroll event should be processed, false if debounced
     func shouldProcessScroll(isContinuous: Bool) -> Bool {
         let currentTime = mach_absolute_time()
-
-        // Use different debounce intervals for trackpad vs mouse
-        let intervalMs = isContinuous ? Config.debounceIntervalMsTrackpad : Config.debounceIntervalMs
-        let debounceNs = UInt64(intervalMs) * nanosecondsPerMs
-
-        // Check if enough time has passed since last scroll
+        let debounceNs = (isContinuous ? trackpadMs : wheelMs) * nanosecondsPerMs
         if currentTime - lastScrollTime >= debounceNs {
             lastScrollTime = currentTime
             return true
         }
-
         return false
     }
 }
+
+enum ScrollDirection { case up, down }
 
 // MARK: - Event Tap Manager
 
@@ -138,404 +112,479 @@ final class EventTapManager {
     private var runLoopSource: CFRunLoopSource?
     private let debouncer = ScrollDebouncer()
     private var healthCheckTimer: Timer?
-    private var isRunning = false
-    
+    private let settings = Settings.shared
+    private let scrollThreshold: Double = 1.0
+
+    var isActive: Bool { eventTap != nil }
+
+    /// Creates the tap. Returns false while Accessibility access is missing.
     func start() -> Bool {
-        print("[\(Date())] ScrollArrows: Starting event tap manager...")
-
-        // Check TCC permissions first
-        guard checkAndRequestPermissions() else {
-            print("[\(Date())] ScrollArrows: ERROR - Accessibility permissions not granted")
-            print("[\(Date())] ScrollArrows: Please grant Accessibility access in System Settings > Privacy & Security > Accessibility")
-            return false
-        }
-
-        // Create the event tap
-        guard createEventTap() else {
-            print("[\(Date())] ScrollArrows: ERROR - Failed to create event tap")
-            return false
-        }
-
-        // Start health monitoring
+        if eventTap != nil { return true }
+        guard AXIsProcessTrusted() else { return false }
+        guard createEventTap() else { return false }
         startHealthCheck()
-
-        isRunning = true
-        print("[\(Date())] ScrollArrows: Event tap started successfully")
-        print("[\(Date())] ScrollArrows: \(Config.triggerModifierName) + scroll → arrow keys")
-        print("[\(Date())] ScrollArrows: \(Config.triggerModifierName) + mouse wheel click → Return key")
-        print("[\(Date())] ScrollArrows: Press Ctrl+C to stop")
-
-        // Run the main run loop
-        RunLoop.current.run()
-
+        log("Event tap started")
         return true
     }
-    
-    func stop() {
-        print("[\(Date())] ScrollArrows: Shutting down...")
-        
-        healthCheckTimer?.invalidate()
-        healthCheckTimer = nil
-        
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
-            runLoopSource = nil
-        }
-        
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            eventTap = nil
-        }
-        
-        isRunning = false
-        print("[\(Date())] ScrollArrows: Stopped")
-    }
-    
-    // MARK: - Permissions
-    
-    private func checkAndRequestPermissions() -> Bool {
-        // Check Input Monitoring permission
-        let listenAccess = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
-        let listenGranted = (listenAccess == kIOHIDAccessTypeGranted)
-        print("[\(Date())] ScrollArrows: Input Monitoring access: \(listenGranted ? "granted" : "not granted")")
-        
-        // Check Accessibility permission (PostEvent)
-        let postAccess = IOHIDCheckAccess(kIOHIDRequestTypePostEvent)
-        let postGranted = (postAccess == kIOHIDAccessTypeGranted)
-        print("[\(Date())] ScrollArrows: Accessibility access: \(postGranted ? "granted" : "not granted")")
-        
-        // If either is granted, we're good
-        if listenGranted || postGranted {
-            return true
-        }
-        
-        // Request accessibility access (this triggers the system dialog)
-        print("[\(Date())] ScrollArrows: Requesting accessibility access...")
-        let requestResult = IOHIDRequestAccess(kIOHIDRequestTypePostEvent)
-        print("[\(Date())] ScrollArrows: Access request result: \(requestResult ? "granted" : "denied")")
-        
-        return requestResult
-    }
-    
-    // MARK: - Event Tap Creation
-    
+
+    // MARK: Event tap creation
+
     private func createEventTap() -> Bool {
-        // Define the events we want to intercept
         let eventMask: CGEventMask = (1 << CGEventType.scrollWheel.rawValue) |
-                                      (1 << CGEventType.keyDown.rawValue) |
-                                      (1 << CGEventType.keyUp.rawValue) |
                                       (1 << CGEventType.otherMouseDown.rawValue) |
-                                      (1 << CGEventType.otherMouseUp.rawValue) |
-                                      (1 << CGEventType.tapDisabledByTimeout.rawValue) |
-                                      (1 << CGEventType.tapDisabledByUserInput.rawValue)
-        
-        // Create the callback
+                                      (1 << CGEventType.otherMouseUp.rawValue)
+
         let callback: CGEventTapCallBack = { proxy, type, event, refcon in
             guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
             let manager = Unmanaged<EventTapManager>.fromOpaque(refcon).takeUnretainedValue()
             return manager.handleEvent(proxy: proxy, type: type, event: event)
         }
-        
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
-        
-        // Create the event tap
+
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: eventMask,
             callback: callback,
-            userInfo: refcon
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            print("[\(Date())] ScrollArrows: ERROR - CGEvent.tapCreate returned nil")
-            print("[\(Date())] ScrollArrows: This usually means:")
-            print("[\(Date())] ScrollArrows:   1. Accessibility permissions not granted")
-            print("[\(Date())] ScrollArrows:   2. Another app has grabbed the event tap")
-            print("[\(Date())] ScrollArrows:   3. The process is sandboxed")
+            log("ERROR - CGEvent.tapCreate returned nil")
             return false
         }
-        
-        eventTap = tap
-        
-        // Create run loop source
+
         guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
-            print("[\(Date())] ScrollArrows: ERROR - Failed to create run loop source")
+            log("ERROR - Failed to create run loop source")
             return false
         }
-        
+
+        eventTap = tap
         runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        
-        // Enable the tap
         CGEvent.tapEnable(tap: tap, enable: true)
-        
         return true
     }
-    
-    // MARK: - Event Handling
-    
+
+    // MARK: Event handling
+
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        // Handle tap disabled events (recovery mechanism)
+        // Recovery: the system disables slow taps; turn it back on
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            print("[\(Date())] ScrollArrows: WARNING - Tap disabled by system, re-enabling...")
-            if let tap = eventTap {
-                CGEvent.tapEnable(tap: tap, enable: true)
-            }
+            log("WARNING - Tap disabled by system, re-enabling...")
+            if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
 
-        // Handle mouse wheel button press (middle button / other mouse button)
-        if type == .otherMouseDown {
+        guard settings.enabled else { return Unmanaged.passUnretained(event) }
+
+        // Middle button (button 2) with modifier -> Return
+        if type == .otherMouseDown || type == .otherMouseUp {
             let flags = event.flags
-            let hasModifier = flags.contains(Config.triggerModifiers)
-
-            // Check if this is the mouse wheel button (button 2) with modifier
-            let buttonNumber = event.getIntegerValueField(.mouseEventButtonNumber)
-            if hasModifier && buttonNumber == 2 {
-                // Generate Return key and swallow the event
-                generateReturnKey(currentFlags: flags)
-                return nil  // Swallow the event
+            let isMiddle = event.getIntegerValueField(.mouseEventButtonNumber) == 2
+            guard settings.returnEnabled, isMiddle, flags.contains(settings.returnFlags) else {
+                return Unmanaged.passUnretained(event)
             }
-
-            return Unmanaged.passUnretained(event)
-        }
-
-        // Ignore otherMouseUp events when modifier is pressed (we already handled the press)
-        if type == .otherMouseUp {
-            let flags = event.flags
-            let hasModifier = flags.contains(Config.triggerModifiers)
-
-            let buttonNumber = event.getIntegerValueField(.mouseEventButtonNumber)
-            if hasModifier && buttonNumber == 2 {
-                // Swallow the release event
-                return nil
+            if type == .otherMouseDown {
+                postKey(KeyCodes.returnKey, flags: flags, strip: settings.returnFlags)
             }
-
-            return Unmanaged.passUnretained(event)
+            return nil  // swallow both press and release
         }
 
-        // Only process scroll wheel events
-        guard type == .scrollWheel else {
-            return Unmanaged.passUnretained(event)
-        }
+        guard type == .scrollWheel else { return Unmanaged.passUnretained(event) }
 
-        // Check if trigger modifier is pressed
         let flags = event.flags
-        // Check if ANY of the configured modifiers are pressed
-        let hasModifier = flags.contains(Config.triggerModifiers)
+        let trigger = settings.scrollFlags
+        guard flags.contains(trigger) else { return Unmanaged.passUnretained(event) }
 
-        // If modifier not pressed, pass through unchanged
-        guard hasModifier else {
-            return Unmanaged.passUnretained(event)
-        }
-
-        // Check if this is a continuous device (trackpad/magic mouse)
         let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
 
-        // Check if we should debounce (use different interval for trackpad)
         guard debouncer.shouldProcessScroll(isContinuous: isContinuous) else {
-            // Still need to swallow the event to prevent scrolling
-            return nil
+            return nil  // swallow to prevent scrolling
         }
 
-        // Extract scroll delta
-        let delta = extractScrollDelta(from: event)
+        let delta = Double(event.getIntegerValueField(
+            isContinuous ? .scrollWheelEventPointDeltaAxis1 : .scrollWheelEventDeltaAxis1))
 
-        // If delta is too small, ignore
-        guard abs(delta) >= Config.scrollThreshold else {
-            return Unmanaged.passUnretained(event)
-        }
+        guard abs(delta) >= scrollThreshold else { return Unmanaged.passUnretained(event) }
 
-        // Determine direction and generate arrow key
         var adjustedDelta = delta
-
         if isContinuous {
-            // Trackpad: always invert to match finger movement direction (undo macOS natural scrolling)
+            // Trackpad: invert to match finger movement (undo natural scrolling)
             adjustedDelta = -delta
-        } else if Config.invertScrollDirection {
-            // Mouse wheel: only apply --invert flag if set
+        } else if settings.invertWheel {
             adjustedDelta = -delta
         }
 
         let direction: ScrollDirection = adjustedDelta > 0 ? .up : .down
-
-        // Swallow the scroll event and generate arrow key
-        generateArrowKey(direction: direction, currentFlags: flags)
-
-        // Return nil to swallow the event
+        postKey(direction == .up ? KeyCodes.upArrow : KeyCodes.downArrow, flags: flags, strip: trigger)
         return nil
     }
-    
-    private func extractScrollDelta(from event: CGEvent) -> Double {
-        // Check if this is a continuous device (trackpad/magic mouse)
-        let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
-        
-        if isContinuous {
-            // For continuous devices, use the point delta for smoother response
-            let pointDelta = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)
-            return Double(pointDelta)
-        } else {
-            // For discrete devices (notched wheels), use the line delta
-            let lineDelta = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
-            return Double(lineDelta)
-        }
-    }
-    
-    private func generateArrowKey(direction: ScrollDirection, currentFlags: CGEventFlags) {
-        let keyCode = (direction == .up) ? KeyCodes.upArrow : KeyCodes.downArrow
 
-        // Create event source
-        guard let source = CGEventSource(stateID: .privateState) else {
-            print("[\(Date())] ScrollArrows: ERROR - Failed to create event source")
+    /// Posts key down + up. The trigger modifiers are stripped so that e.g.
+    /// Control+Arrow does not open Mission Control.
+    private func postKey(_ keyCode: CGKeyCode, flags: CGEventFlags, strip: CGEventFlags) {
+        guard let source = CGEventSource(stateID: .privateState),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
+            log("ERROR - Failed to create key event")
             return
         }
-
-        // Strip the trigger modifier to prevent Control+Arrow (which triggers Mission Control)
-        var modifiedFlags = currentFlags
-        modifiedFlags.remove(Config.triggerModifiers)
-
-        // Create key down event
-        guard let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true) else {
-            print("[\(Date())] ScrollArrows: ERROR - Failed to create key down event")
-            return
-        }
-        keyDownEvent.flags = modifiedFlags
-
-        // Create key up event
-        guard let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
-            print("[\(Date())] ScrollArrows: ERROR - Failed to create key up event")
-            return
-        }
-        keyUpEvent.flags = modifiedFlags
-
-        // Post events
-        keyDownEvent.post(tap: .cghidEventTap)
-        keyUpEvent.post(tap: .cghidEventTap)
-
-        let directionStr = (direction == .up) ? "UP" : "DOWN"
-        print("[\(Date())] ScrollArrows: Generated \(directionStr) arrow key")
+        var f = flags
+        f.remove(strip)
+        down.flags = f
+        up.flags = f
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
     }
 
-    private func generateReturnKey(currentFlags: CGEventFlags) {
-        // Create event source
-        guard let source = CGEventSource(stateID: .privateState) else {
-            print("[\(Date())] ScrollArrows: ERROR - Failed to create event source")
-            return
-        }
+    // MARK: Health monitoring
 
-        // Strip the trigger modifier
-        var modifiedFlags = currentFlags
-        modifiedFlags.remove(Config.triggerModifiers)
-
-        // Create key down event
-        guard let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: KeyCodes.returnKey, keyDown: true) else {
-            print("[\(Date())] ScrollArrows: ERROR - Failed to create Return key down event")
-            return
-        }
-        keyDownEvent.flags = modifiedFlags
-
-        // Create key up event
-        guard let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: KeyCodes.returnKey, keyDown: false) else {
-            print("[\(Date())] ScrollArrows: ERROR - Failed to create Return key up event")
-            return
-        }
-        keyUpEvent.flags = modifiedFlags
-
-        // Post events
-        keyDownEvent.post(tap: .cghidEventTap)
-        keyUpEvent.post(tap: .cghidEventTap)
-
-        print("[\(Date())] ScrollArrows: Generated Return key")
-    }
-    
-    // MARK: - Health Monitoring
-    
     private func startHealthCheck() {
-        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: Config.healthCheckInterval, repeats: true) { [weak self] _ in
+        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             self?.checkTapHealth()
         }
     }
-    
+
     private func checkTapHealth() {
         guard let tap = eventTap else { return }
-        
-        let isEnabled = CGEvent.tapIsEnabled(tap: tap)
-        
-        if !isEnabled {
-            print("[\(Date())] ScrollArrows: WARNING - Tap disabled, attempting recovery...")
-            
-            // Try to re-enable
-            CGEvent.tapEnable(tap: tap, enable: true)
-            
-            // Check if re-enable worked
-            if CGEvent.tapIsEnabled(tap: tap) {
-                print("[\(Date())] ScrollArrows: Tap re-enabled successfully")
-            } else {
-                print("[\(Date())] ScrollArrows: ERROR - Failed to re-enable tap, recreating...")
-                
-                // Tear down and recreate
-                if let source = runLoopSource {
-                    CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-                    runLoopSource = nil
-                }
-                
-                eventTap = nil
-                
-                // Try to recreate
-                if createEventTap() {
-                    print("[\(Date())] ScrollArrows: Tap recreated successfully")
-                } else {
-                    print("[\(Date())] ScrollArrows: ERROR - Failed to recreate tap")
-                }
-            }
+        if CGEvent.tapIsEnabled(tap: tap) { return }
+
+        log("WARNING - Tap disabled, attempting recovery...")
+        CGEvent.tapEnable(tap: tap, enable: true)
+        if CGEvent.tapIsEnabled(tap: tap) {
+            log("Tap re-enabled successfully")
+            return
+        }
+
+        log("ERROR - Failed to re-enable tap, recreating...")
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            runLoopSource = nil
+        }
+        CFMachPortInvalidate(tap)
+        eventTap = nil
+        if createEventTap() {
+            log("Tap recreated successfully")
+        } else {
+            log("ERROR - Failed to recreate tap, exiting")
+            exit(1)
         }
     }
 }
 
-// MARK: - Supporting Types
-
-enum ScrollDirection {
-    case up
-    case down
+func log(_ message: String) {
+    print("[\(Date())] ScrollArrows: \(message)")
 }
 
-// MARK: - Signal Handling
+// MARK: - Launch at login
 
-func setupSignalHandlers() {
-    signal(SIGINT) { _ in
-        print("\n[\(Date())] ScrollArrows: Received SIGINT, shutting down...")
-        exit(0)
+enum LoginItem {
+    /// SMAppService needs an app bundle; a plain binary cannot register itself.
+    static var isAvailable: Bool { Bundle.main.bundleIdentifier != nil }
+
+    static var isEnabled: Bool {
+        isAvailable && SMAppService.mainApp.status == .enabled
     }
-    
-    signal(SIGTERM) { _ in
-        print("\n[\(Date())] ScrollArrows: Received SIGTERM, shutting down...")
-        exit(0)
+
+    static func set(_ on: Bool) throws {
+        if on {
+            try SMAppService.mainApp.register()
+        } else {
+            try SMAppService.mainApp.unregister()
+        }
+    }
+}
+
+// MARK: - Settings UI
+
+/// Click, then press and release the modifier combination. Esc cancels.
+/// State lives in classes: the @State macro needs a compiler plugin that plain swiftc lacks.
+final class Recorder: ObservableObject {
+    @Published var recording = false
+    @Published var peak: NSEvent.ModifierFlags = []
+    private var monitor: Any?
+
+    func start(onCommit: @escaping (UInt64) -> Void) {
+        stop()
+        peak = []
+        recording = true
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
+            guard let self else { return event }
+            if event.type == .keyDown {
+                if event.keyCode == KeyCodes.escape { self.stop() }
+                return nil
+            }
+            let held = event.modifierFlags.intersection([.control, .option, .shift, .command])
+            if held.isEmpty {
+                // All keys released: save the largest combination that was held
+                let combo = Modifiers.cgFlags(from: self.peak)
+                if combo != 0 { onCommit(combo) }
+                self.stop()
+            } else {
+                self.peak.formUnion(held)
+            }
+            return nil
+        }
+    }
+
+    func stop() {
+        if let m = monitor { NSEvent.removeMonitor(m) }
+        monitor = nil
+        recording = false
+    }
+}
+
+struct ModifierRecorder: View {
+    @Binding var value: UInt64
+    @ObservedObject var recorder: Recorder
+
+    var body: some View {
+        Button(action: {
+            if recorder.recording { recorder.stop() } else { recorder.start { value = $0 } }
+        }) {
+            Text(label)
+                .frame(minWidth: 150)
+                .foregroundColor(recorder.recording ? .accentColor : .primary)
+        }
+    }
+
+    private var label: String {
+        if !recorder.recording { return Modifiers.symbols(value) }
+        let held = Modifiers.cgFlags(from: recorder.peak)
+        return held == 0 ? "Press modifiers…" : Modifiers.symbols(held)
+    }
+}
+
+/// Window-local state of the settings view.
+final class SettingsUIState: ObservableObject {
+    @Published var launchAtLogin = LoginItem.isEnabled
+    @Published var loginError: String?
+    @Published var trusted = AXIsProcessTrusted()
+    let scrollRecorder = Recorder()
+    let returnRecorder = Recorder()
+
+    func setLaunchAtLogin(_ on: Bool) {
+        do {
+            try LoginItem.set(on)
+            loginError = nil
+        } catch {
+            loginError = error.localizedDescription
+        }
+        launchAtLogin = LoginItem.isEnabled
+    }
+
+    func refresh() {
+        trusted = AXIsProcessTrusted()
+        launchAtLogin = LoginItem.isEnabled
+    }
+
+    func stopRecording() {
+        scrollRecorder.stop()
+        returnRecorder.stop()
+    }
+}
+
+struct SettingsView: View {
+    @ObservedObject var settings = Settings.shared
+    @ObservedObject var ui: SettingsUIState
+    let accessTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Enabled", isOn: $settings.enabled)
+                LabeledContent("Scroll → arrow keys") {
+                    ModifierRecorder(value: $settings.scrollModifiers, recorder: ui.scrollRecorder)
+                }
+                Toggle("Invert mouse wheel direction", isOn: $settings.invertWheel)
+            }
+            Section {
+                Toggle("Middle click → Return", isOn: $settings.returnEnabled)
+                LabeledContent("Middle click modifier") {
+                    ModifierRecorder(value: $settings.returnModifiers, recorder: ui.returnRecorder)
+                }
+                .disabled(!settings.returnEnabled)
+            } footer: {
+                Text("Click a shortcut, press and release the modifier keys. Esc cancels.")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            Section {
+                Toggle("Launch at login", isOn: Binding(
+                    get: { ui.launchAtLogin },
+                    set: { ui.setLaunchAtLogin($0) }))
+                    .disabled(!LoginItem.isAvailable)
+                if !LoginItem.isAvailable {
+                    Text("Available only when running ScrollArrows.app.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                if let err = ui.loginError {
+                    Text(err).font(.caption).foregroundColor(.red)
+                }
+                Toggle("Show icon in menu bar", isOn: $settings.showMenuBarIcon)
+                if !settings.showMenuBarIcon {
+                    Text("To bring this window back, open ScrollArrows again.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            Section {
+                LabeledContent("Accessibility") {
+                    if ui.trusted {
+                        Text("Granted").foregroundColor(.secondary)
+                    } else {
+                        Button("Open System Settings") { AppDelegate.openAccessibilitySettings() }
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 420)
+        .fixedSize()
+        .onReceive(accessTimer) { _ in ui.refresh() }
+    }
+}
+
+// MARK: - App
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
+    private let tap = EventTapManager()
+    private var statusItem: NSStatusItem!
+    private var settingsWindow: NSWindow?
+    private let settingsUI = SettingsUIState()
+    private var retryTimer: Timer?
+    private var iconObserver: Any?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        setupStatusItem()
+
+        if !tap.start() {
+            // Ask once with the system prompt, then keep retrying until granted
+            let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(opts)
+            log("Waiting for Accessibility access...")
+            retryTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] t in
+                guard let self else { return }
+                if self.tap.start() {
+                    t.invalidate()
+                    self.updateIcon()
+                }
+            }
+        }
+        updateIcon()
+
+        // Hidden icon would leave no way to reach settings at first run
+        if !Settings.shared.showMenuBarIcon && !AXIsProcessTrusted() {
+            showSettings()
+        }
+    }
+
+    /// Opening the app again (Finder, Spotlight, `open`) shows the settings window.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showSettings()
+        return true
+    }
+
+    // MARK: Status item
+
+    private func setupStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let menu = NSMenu()
+        menu.delegate = self
+        statusItem.menu = menu
+        statusItem.isVisible = Settings.shared.showMenuBarIcon
+
+        iconObserver = Settings.shared.objectWillChange.sink { [weak self] in
+            DispatchQueue.main.async {
+                self?.statusItem.isVisible = Settings.shared.showMenuBarIcon
+                self?.updateIcon()
+            }
+        }
+    }
+
+    private func updateIcon() {
+        let active = tap.isActive && Settings.shared.enabled
+        let name = active ? "arrow.up.arrow.down.circle" : "arrow.up.arrow.down.circle.dotted"
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: "ScrollArrows")
+        image?.isTemplate = true
+        statusItem.button?.image = image
+        statusItem.button?.appearsDisabled = !active
+    }
+
+    /// Rebuilt on every open so it always shows the current state.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let s = Settings.shared
+
+        if !tap.isActive {
+            menu.addItem(withTitle: "Accessibility access needed…",
+                         action: #selector(openAccessibility), keyEquivalent: "").target = self
+            menu.addItem(.separator())
+        }
+
+        let toggle = menu.addItem(withTitle: "Enabled", action: #selector(toggleEnabled), keyEquivalent: "")
+        toggle.target = self
+        toggle.state = s.enabled ? .on : .off
+
+        let info = menu.addItem(withTitle: "\(Modifiers.symbols(s.scrollModifiers)) + scroll → ↑ ↓", action: nil, keyEquivalent: "")
+        info.isEnabled = false
+        if s.returnEnabled {
+            let ret = menu.addItem(withTitle: "\(Modifiers.symbols(s.returnModifiers)) + middle click → Return", action: nil, keyEquivalent: "")
+            ret.isEnabled = false
+        }
+
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",").target = self
+        menu.addItem(withTitle: "Quit ScrollArrows", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    }
+
+    @objc private func toggleEnabled() {
+        Settings.shared.enabled.toggle()
+    }
+
+    @objc private func openAccessibility() {
+        AppDelegate.openAccessibilitySettings()
+    }
+
+    static func openAccessibilitySettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc func showSettings() {
+        if settingsWindow == nil {
+            let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(ui: settingsUI)))
+            window.delegate = self
+            window.title = "ScrollArrows"
+            window.styleMask = [.titled, .closable]
+            window.isReleasedWhenClosed = false
+            window.center()
+            settingsWindow = window
+        }
+        settingsUI.refresh()
+        NSApp.activate()
+        settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        settingsUI.stopRecording()
     }
 }
 
 // MARK: - Main Entry Point
 
-// Parse command line arguments
-Config.parseArgs()
+if CommandLine.arguments.contains("--help") || CommandLine.arguments.contains("-h") {
+    print("""
+    ScrollArrows - modifier + scroll -> arrow keys, modifier + middle click -> Return
 
-print("========================================")
-print("ScrollArrows - Modifier+Scroll to Arrows")
-print("========================================")
-print("")
-
-// Print configuration info
-if Config.invertScrollDirection {
-    print("Invert scroll direction: enabled")
+    Runs as a menu bar app. All settings are in the menu bar icon -> Settings…
+    If the icon is hidden, open the app again to show the settings window.
+    """)
+    exit(0)
 }
-print("")
 
-// Setup signal handlers for clean shutdown
-setupSignalHandlers()
+signal(SIGINT) { _ in exit(0) }
+signal(SIGTERM) { _ in exit(0) }
 
-// Create and start the manager
-let manager = EventTapManager()
-
-// Keep the manager alive
-withExtendedLifetime(manager) {
-    _ = manager.start()
-}
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.delegate = delegate
+app.setActivationPolicy(.accessory)
+app.run()
