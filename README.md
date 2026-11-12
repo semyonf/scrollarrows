@@ -87,24 +87,20 @@ rm ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
 2. Check: Are you holding the right modifier? (Default is Ctrl)
 3. Check: Is another app (Karabiner, BetterTouchTool) intercepting your mouse events first?
 
-**Permissions reset after recompilation**
-- Each new compilation creates a new binary. You may need to re-grant Accessibility permissions.
-- To help persistence:
+**Accessibility asks again after a rebuild**
+- The permission is tied to the code signature, and an ad hoc signature changes with every build. Build with `SIGN_ID` (see Settings), or reset the entry and grant it again:
   ```bash
-  xattr -d com.apple.quarantine ./scroll_arrows
-  codesign --force --deep -s - ./scroll_arrows
+  tccutil reset Accessibility com.scrollarrows.app
   ```
 
-**Permission issues on iTerm2 or other terminals**
-- Try resetting permissions:
-  ```bash
-  # For Terminal.app
-  tccutil reset Accessibility com.apple.Terminal
+## Uninstall
 
-  # For iTerm2
-  tccutil reset Accessibility com.googlecode.iterm2
-  ```
-  Then re-grant in System Settings.
+Turn off **Launch at login** in Settings, quit from the menu, then delete the app and its settings:
+
+```bash
+rm -rf /Applications/ScrollArrows.app
+defaults delete com.scrollarrows.app
+```
 
 ## How It Works (Technical Details)
 
@@ -119,7 +115,7 @@ rm ~/Library/LaunchAgents/com.scrollarrows.launchd.plist
 - **Lightweight**: Native Swift + CoreGraphics, minimal resource usage
 - **Universal**: Works with trackpads and mouse wheels
 - **Auto-Recovery**: Handles macOS permission edge cases automatically
-- **Debounced**: 80ms lockout prevents event spam
+- **Debounced**: at most one arrow per 40 ms (mouse wheel) or 200 ms (trackpad); trackpad momentum is ignored
 
 **Components** (for developers):
 - `EventTapManager` — Manages system event interception

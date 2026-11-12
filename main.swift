@@ -86,13 +86,13 @@ final class ScrollDebouncer {
     private var lastScrollTime: UInt64 = 0
     private let nanosecondsPerMs: UInt64 = 1_000_000
 
-    // Debounce intervals in milliseconds
-    private let wheelMs: UInt64 = 1
-    private let trackpadMs: UInt64 = 5
+    // Minimum time between generated arrow keys, in milliseconds
+    private let wheelMs: UInt64 = 40
+    private let trackpadMs: UInt64 = 200
 
     /// Returns true if the scroll event should be processed, false if debounced
     func shouldProcessScroll(isContinuous: Bool) -> Bool {
-        let currentTime = mach_absolute_time()
+        let currentTime = DispatchTime.now().uptimeNanoseconds
         let debounceNs = (isContinuous ? trackpadMs : wheelMs) * nanosecondsPerMs
         if currentTime - lastScrollTime >= debounceNs {
             lastScrollTime = currentTime
@@ -113,7 +113,8 @@ final class EventTapManager {
     private let debouncer = ScrollDebouncer()
     private var healthCheckTimer: Timer?
     private let settings = Settings.shared
-    private let scrollThreshold: Double = 1.0
+    /// True while a middle-button press is swallowed, so its release is swallowed too.
+    private var swallowingMiddleClick = false
 
     var isActive: Bool { eventTap != nil }
 
@@ -178,15 +179,23 @@ final class EventTapManager {
 
         // Middle button (button 2) with modifier -> Return
         if type == .otherMouseDown || type == .otherMouseUp {
-            let flags = event.flags
-            let isMiddle = event.getIntegerValueField(.mouseEventButtonNumber) == 2
-            guard settings.returnEnabled, isMiddle, flags.contains(settings.returnFlags) else {
+            guard event.getIntegerValueField(.mouseEventButtonNumber) == 2 else {
                 return Unmanaged.passUnretained(event)
             }
-            if type == .otherMouseDown {
-                postKey(KeyCodes.returnKey, flags: flags, strip: settings.returnFlags)
+            if type == .otherMouseUp {
+                // Swallow the release only if its press was swallowed,
+                // no matter which modifiers are held now
+                let swallow = swallowingMiddleClick
+                swallowingMiddleClick = false
+                return swallow ? nil : Unmanaged.passUnretained(event)
             }
-            return nil  // swallow both press and release
+            let flags = event.flags
+            guard settings.returnEnabled, flags.contains(settings.returnFlags) else {
+                return Unmanaged.passUnretained(event)
+            }
+            swallowingMiddleClick = true
+            postKey(KeyCodes.returnKey, flags: flags, strip: settings.returnFlags)
+            return nil
         }
 
         guard type == .scrollWheel else { return Unmanaged.passUnretained(event) }
@@ -196,20 +205,24 @@ final class EventTapManager {
         guard flags.contains(trigger) else { return Unmanaged.passUnretained(event) }
 
         let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
+        let delta = event.getIntegerValueField(
+            isContinuous ? .scrollWheelEventPointDeltaAxis1 : .scrollWheelEventDeltaAxis1)
 
-        guard debouncer.shouldProcessScroll(isContinuous: isContinuous) else {
-            return nil  // swallow to prevent scrolling
-        }
+        // No vertical movement (horizontal scroll, gesture end): leave it alone
+        guard delta != 0 else { return Unmanaged.passUnretained(event) }
 
-        let delta = Double(event.getIntegerValueField(
-            isContinuous ? .scrollWheelEventPointDeltaAxis1 : .scrollWheelEventDeltaAxis1))
-
-        guard abs(delta) >= scrollThreshold else { return Unmanaged.passUnretained(event) }
+        // From here on every vertical scroll is swallowed, so the list never scrolls.
+        // Momentum after the fingers leave the trackpad must not add arrows.
+        if event.getIntegerValueField(.scrollWheelEventMomentumPhase) != 0 { return nil }
+        guard debouncer.shouldProcessScroll(isContinuous: isContinuous) else { return nil }
 
         var adjustedDelta = delta
         if isContinuous {
-            // Trackpad: invert to match finger movement (undo natural scrolling)
-            adjustedDelta = -delta
+            // Trackpad: follow the finger. With natural scrolling the system
+            // has already flipped the delta, so flip it back.
+            if NSEvent(cgEvent: event)?.isDirectionInvertedFromDevice == true {
+                adjustedDelta = -delta
+            }
         } else if settings.invertWheel {
             adjustedDelta = -delta
         }
